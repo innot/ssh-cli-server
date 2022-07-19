@@ -3,11 +3,11 @@ requires = ["setuptools", "setuptools_scm"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "SSH CLI Server"
-description = "Library to integrate a SSH server running a custom command line interface into applications"
+name = "ssh-cli-server"
+description = "Library to provide an SSH Server serving easily customizable command line interfaces."
 readme = "README.rst"
 requires-python = ">=3.7"
-license = {file = "LICENSE.txt"}
+license = {text = "MIT"}
 authors = [
     {name="Thomas Holland", email="thomas@innot.de"}
 ]
@@ -23,10 +23,6 @@ classifiers = [
     "Topic :: System :: Shells",
     "Topic :: Utilities"
 ]
-urls = [
-    "github" = "https://github.com/innot/sshcliserver",
-    "readthedocs" = "https://sshcliserver.readthedocs.com"
-]
 dependencies = [
     "argparsedecorator",
     "prompt-toolkit",
@@ -35,12 +31,26 @@ dependencies = [
 ]
 dynamic = ["version"]
 
+[project.urls]
+Source = "https://github.com/innot/sshcliserver"
+Documentation = "https://sshcliserver.readthedocs.com"
+download = "https://github.com/innot/sshcliserver/releases"
+tracker = "https://github.com/innot/sshcliserver/issues"
+
 [project.optional-dependencies]
+doc = [
+    "sphinx",
+    "sphinx-rtd-theme"
+]
 
 [project.scripts]
-sshcliserver = "sshcliserver/runserver:main"
+sshcliserver = "sshcliserver.runserver:main"
 
 # ... other project metadata fields as specified in:
 #     https://packaging.python.org/en/latest/specifications/declaring-project-metadata/
+
+# uncomment when not beta anymore
+# [tool.setuptools]
+# packages = ["sshcliserver"]
 
 [tool.setuptools_scm]

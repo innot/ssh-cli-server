@@ -5,4 +5,3 @@
 #  go to <https://opensource.org/licenses/MIT>.
 #
 
-__version__ = 0.1.0
