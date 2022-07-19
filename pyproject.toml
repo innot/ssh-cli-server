@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools", "setuptools_scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "SSH CLI Server"
+description = "Library to integrate a SSH server running a custom command line interface into applications"
+readme = "README.rst"
+requires-python = ">=3.7"
+license = {file = "LICENSE.txt"}
+authors = [
+    {name="Thomas Holland", email="thomas@innot.de"}
+]
+keywords = ["cli", "ssh", "server", "library", "argparse"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Developers",
+    "Natural Language :: English",
+    "Topic :: Software Development",
+    "Topic :: System :: Shells",
+    "Topic :: Utilities"
+]
+urls = [
+    "github" = "https://github.com/innot/sshcliserver",
+    "readthedocs" = "https://sshcliserver.readthedocs.com"
+]
+dependencies = [
+    "argparsedecorator",
+    "prompt-toolkit",
+    "asyncssh",
+    'importlib-metadata; python_version<"3.8"',
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+
+[project.scripts]
+sshcliserver = "sshcliserver/runserver:main"
+
+# ... other project metadata fields as specified in:
+#     https://packaging.python.org/en/latest/specifications/declaring-project-metadata/
+
+[tool.setuptools_scm]
