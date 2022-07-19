@@ -1,0 +1,5 @@
+
+Required:
+
+Optional:
+    - keyring support for storing user & host keys (https://pypi.org/project/keyring/)
