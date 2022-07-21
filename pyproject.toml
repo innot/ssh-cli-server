@@ -51,6 +51,7 @@ sshcliserver = "sshcliserver.runserver:main"
 
 # uncomment when not beta anymore
 # [tool.setuptools]
-# packages = ["sshcliserver"]
+# packages = ["ssh_cli_server"]
+# package-dir = { const = "" }
 
 [tool.setuptools_scm]
