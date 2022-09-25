@@ -5,7 +5,6 @@
 #  go to <https://opensource.org/licenses/MIT>.
 #
 import hashlib
-import io
 import uuid
 from abc import ABC
 from pathlib import Path
@@ -14,7 +13,13 @@ from typing import Union, TextIO, Dict
 
 class AbstractPasswordManager(ABC):
     """
+    Base class for any PasswordManager.
 
+    Has only one method:
+    :meth:`check_pwd` to check that the given password is correct for the given user.
+
+    The actual implementation is up to the subclass and can be anything from a simple Dictionary or File
+    (see :class:`SimpleFilePasswordManager`) to an interface to an external user database.
     """
 
     def check_pwd(self, username: str, password: str):
@@ -23,10 +28,22 @@ class AbstractPasswordManager(ABC):
 
 class SimpleFilePasswordManager(AbstractPasswordManager):
     """
+    Simple password manager implementation that stores username and password in a Dictionary which is
+    optionally saved to a simple text file.
+
+    Both the in-memory Dictionary and the file store the password encrypted. By default, the encryption is
+    a 128-bit random salt and a 512-bit hash of the password generated with the :external:meth:`~hashlib.scrypt`
+    method of the :external:lib:`hashlib` library.
+    Override :meth:`encrypt` to implement a different encryption method.
 
     This simple manager allows any string as a password, including an empty string
     which is equivalent to no password.
     If password quality is an issue check the password before storing it in this manager.
+
+    If the :data:`pwd_file` property is set, all changes to the password "database" are automatically and
+    immediatley written to this file. This file will only be loaded either at instantiation (when the 'pwd_file'
+    argument is supplied) or with an explicit call to :meth:`load`. External changes to the file are not picked up
+    during runtime.
     """
 
     def __init__(self, pwd_file: Union[str, bytes, Path] = None):
@@ -49,10 +66,9 @@ class SimpleFilePasswordManager(AbstractPasswordManager):
 
         user_pw = self._passwords.get(username)
         salt = bytearray.fromhex(user_pw[:32])
-        real_pw = bytearray.fromhex(user_pw[32:])
         presented_pw = self.encrypt(password.encode(), salt)
 
-        return real_pw == presented_pw
+        return user_pw == presented_pw
 
     @property
     def pwd_file(self) -> Path:
@@ -69,10 +85,10 @@ class SimpleFilePasswordManager(AbstractPasswordManager):
 
     def add_user(self, username: str, password: str = None):
         """
-        Add a new username to the passwords database.
+        Add a new username to the password database.
 
         :param username: Name of the user. Must only contain letters, digits or '_'.
-        :param password:
+        :param password: The initial password. Can be any string, default is :code:`None` for no password.
         :raises ValueError: if the username is already in the database.
         """
         if username in self._passwords:
@@ -88,11 +104,18 @@ class SimpleFilePasswordManager(AbstractPasswordManager):
         if self.pwd_file:
             self.save()
 
-    def change_password(self, username: str, new_password: str):
+    def change_password(self, username: str, new_password: str) -> None:
+        """
+        Change the password for the given user.
+        The is first encrypted (hashed with random salt) and stored in the in-memory "database".
+        If a :data:`pwd_file` has been set the complete database, including the changed password, is saved.
+
+        :param username: String with existing username.
+        :param new_password: The new password.
+        :raises ValueError: if the username does not exist in the database.
+        """
         if username in self._passwords:
-            salt = uuid.uuid4()
-            pw_enc = self.encrypt(new_password.encode(), salt.bytes)
-            pw_hex = f"{salt.hex}{pw_enc.hex()}"
+            pw_hex = self.encrypt(new_password.encode())
             self._passwords[username] = pw_hex
             if self.pwd_file:
                 self.save()
@@ -101,8 +124,10 @@ class SimpleFilePasswordManager(AbstractPasswordManager):
 
     def remove_user(self, username) -> None:
         """
-        Remove the user
-        :param username:
+        Remove the user from the database.
+        If a :data:`pwd_file` has been set the complete database, without the removed user, is saved.
+
+        :param username: String with the name of the user to be removed.
         :raises: KeyError if the username is unknown.
         """
         self._passwords.pop(username)
@@ -110,11 +135,33 @@ class SimpleFilePasswordManager(AbstractPasswordManager):
             self.save()
 
     def has_user(self, username: str) -> bool:
+        """
+        Check if the user exists in the database.
+
+        :param username: Name to check.
+        :return: :code:`True` if the user exists in the database.
+        """
         return username in self._passwords
 
     @staticmethod
-    def encrypt(password: bytes, salt: bytes):
-        return hashlib.scrypt(password, salt=salt, n=16384, r=8, p=1)
+    def encrypt(password: bytes, salt: bytes = None) -> str:
+        """
+        Encrypt the given password.
+
+        If the 'salt' argument is not supplied, a random 128-bit salt is used to encrypt the password.
+
+        The returned value is a hex string starting with the salt (first 32 hex characters) immediatly followed by
+        the 512-bit (128 character) hash of the password.
+
+        :param password: The password as an array of bytes
+        :param salt: Optional salt for encrypting the password.
+        :return: The salt + password hash as hex string.
+        """
+        if not salt:
+            salt = uuid.uuid4().bytes
+        pw_enc = hashlib.scrypt(password, salt=salt, n=16384, r=8, p=1)
+        pw_hex = f"{salt.hex()}{pw_enc.hex()}"
+        return pw_hex
 
     def _load(self, pwd_file: TextIO):
         pwd_file.seek(0)  # start at the beginning if this is just some StringIO from unittests
@@ -136,7 +183,7 @@ class SimpleFilePasswordManager(AbstractPasswordManager):
 
             username : encrypted_password
 
-        All lines starting with a '#' are ignored, as is any whitespace.
+        All lines starting with a '#' are ignored and not preserved, as is any whitespace.
 
         :param pwd_file: Name of the passwords file. Can be an opened file like a StringIO.
                          Defaults to the filename set with :attr:`pwd_file`
@@ -179,19 +226,3 @@ class SimpleFilePasswordManager(AbstractPasswordManager):
                 self.pwd_file = Path(pwd_file)  #
         except (AttributeError, TypeError):
             self._save(pwd_file)
-
-
-if __name__ == "__main__":
-    pwds = SimpleFilePasswordManager()
-    pwds.add_user("foo", "bar")
-    assert pwds.check_pwd("foo", "bar")
-    assert pwds.check_pwd("foo", "baz") is False
-    f = io.StringIO()
-    pwds.save(f)
-    print(f.getvalue())
-    f.seek(0)
-
-    pwds = SimpleFilePasswordManager()
-    pwds.load(f)
-    assert pwds.check_pwd("foo", "bar")
-    assert pwds.check_pwd("foo", "baz") is False
