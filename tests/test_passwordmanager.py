@@ -32,25 +32,25 @@ class MyTestCase(unittest.TestCase):
 
         pwdm.add_user("foo", "real_password")
 
-        self.assertTrue(pwdm.check_pwd("foo", "real_password"))
-        self.assertFalse(pwdm.check_pwd("foo", "wrong password"))
-        self.assertFalse(pwdm.check_pwd("foo", ""))
-        self.assertFalse(pwdm.check_pwd("unknown", "real_password"))
+        self.assertTrue(pwdm.authenticate("foo", "real_password"))
+        self.assertFalse(pwdm.authenticate("foo", "wrong password"))
+        self.assertFalse(pwdm.authenticate("foo", ""))
+        self.assertFalse(pwdm.authenticate("unknown", "real_password"))
         # noinspection PyTypeChecker
-        self.assertFalse(pwdm.check_pwd("foo", None))
+        self.assertFalse(pwdm.authenticate("foo", None))
         # noinspection PyTypeChecker
-        self.assertFalse(pwdm.check_pwd(None, None))
+        self.assertFalse(pwdm.authenticate(None, None))
         # noinspection PyTypeChecker
-        self.assertFalse(pwdm.check_pwd(123, 456))
+        self.assertFalse(pwdm.authenticate(123, 456))
 
     def test_user_methods(self):
         pwdm = SimpleFilePasswordManager()
 
         pwdm.add_user("user")
         self.assertTrue(pwdm.has_user("user"))
-        self.assertFalse(pwdm.check_pwd("user", ""))
+        self.assertFalse(pwdm.authenticate("user", ""))
         pwdm.change_password("user", "password")
-        self.assertTrue(pwdm.check_pwd("user", "password"))
+        self.assertTrue(pwdm.authenticate("user", "password"))
         pwdm.remove_user("user")
         self.assertFalse(pwdm.has_user("user"))
 
@@ -97,14 +97,32 @@ class MyTestCase(unittest.TestCase):
         pwdm.add_user("user", "password")
         file = StringIO()
         pwdm.save(file)
-        user, password = file.getvalue().split(':')
+        content = file.getvalue()
+        user, password = content.split(':')
         self.assertEqual("user", user)
         self.assertGreater(len(password), 32)
 
-        file.seek(0)  # rewind to beginning
+        file = StringIO()
+        file.writelines(["# comments should be ignored\n", "#\n", "\n", content, "# end of file\n"])
+        pwdm = SimpleFilePasswordManager(file)
+        self.assertTrue(pwdm.authenticate("user", "password"))
+
+
+    def test_execptions(self):
         pwdm = SimpleFilePasswordManager()
-        pwdm.load(file)
-        self.assertTrue(pwdm.check_pwd("user", "password"))
+        pwdm.add_user("user", "password")
+
+        # Duplicate user name
+        with self.assertRaises(ValueError) as context:
+            pwdm.add_user("user", "")
+
+        # invalid user name
+        with self.assertRaises(ValueError) as context:
+            pwdm.add_user("&name", "")
+
+        # change password for unknown user
+        with self.assertRaises(ValueError) as context:
+            pwdm.change_password("nobody", "test")
 
 
 if __name__ == '__main__':

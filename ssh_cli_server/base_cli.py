@@ -17,7 +17,7 @@ from prompt_toolkit.completion import Completer, NestedCompleter
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style
 
-from ssh_cli_server.server import AbstractCLI, SSHCLIPromptToolkitSession
+from ssh_cli_server.ssh_cli_server import AbstractCLI, SSHCLIPromptToolkitSession
 
 style = Style.from_dict({
     'error': 'red',
@@ -229,18 +229,23 @@ class BaseCLI(AbstractCLI):
                         if result == "exit":
                             # close current connection
                             print_warn("Closing SSH connection")
-                            return
+                            break
 
                         if result == "shutdown":
                             if self.sshserver:
                                 print_warn("SSH Server is shutting down")
                                 self.sshserver.close()
-                                return
+                                break
                             print_warn("Could not shut down ssh server: server not set_option")
 
                 except KeyboardInterrupt:
                     print_warn("SSH connection closed by Ctrl-C")
-                    return
+                    break
                 except EOFError:
                     # Ctrl-D : ignore
                     pass
+                except Exception as exc:
+                    break
+                finally:
+                    pass
+        pass

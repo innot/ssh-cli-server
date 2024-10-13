@@ -1,4 +1,4 @@
-setuptools==63.2.0
-argparsedecorator>=1.1.0
-prompt_toolkit>=3.0.30
+setuptools>=63.2.0
+argparsedecorator>=1.2.0
+prompt-toolkit>=3.0.40
 asyncssh>=2.11

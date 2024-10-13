@@ -6,8 +6,8 @@
 #
 import asyncio
 
-from ssh_cli_server.demo_cli import DemoCLI
-from ssh_cli_server.server import SSHCLIServer
+from examples.demo_cli import DemoCLI
+from ssh_cli_server.ssh_cli_server import SSHCLIServer
 from ssh_cli_server.serverconfig import ServerConfig
 
 

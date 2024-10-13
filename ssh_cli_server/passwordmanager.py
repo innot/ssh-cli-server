@@ -10,19 +10,31 @@ from abc import ABC
 from pathlib import Path
 from typing import Union, TextIO, Dict
 
+"""
+The Passwordmanager checks if a supplied password matches the for a given user.
+
+"""
+
 
 class AbstractPasswordManager(ABC):
     """
     Base class for any PasswordManager.
 
     Has only one method:
-    :meth:`check_pwd` to check that the given password is correct for the given user.
+    :meth:`authenticate` to check that the given password is correct for the given user.
 
     The actual implementation is up to the subclass and can be anything from a simple Dictionary or File
     (see :class:`SimpleFilePasswordManager`) to an interface to an external user database.
     """
 
-    def check_pwd(self, username: str, password: str):
+    def authenticate(self, username: str, password: str) -> bool:
+        """
+        Returns :code:`True` if the given password is valid for the given username.
+
+        :param username: String with the name of the user.
+        :param password: String with the password to check against.
+        :return: :code:`True` if the password is correct, :code:`False` otherwise.
+        """
         pass
 
 
@@ -46,17 +58,21 @@ class SimpleFilePasswordManager(AbstractPasswordManager):
     during runtime.
     """
 
-    def __init__(self, pwd_file: Union[str, bytes, Path] = None):
+    def __init__(self, pwd_file: Union[str, bytes, Path, TextIO] = None):
         super().__init__()
         self._passwords: Dict[str, str] = {}
 
         if pwd_file:
-            self._pwd_file: Path = Path(pwd_file)
+            try:
+                self._pwd_file: Path = Path(pwd_file)
+            except TypeError:      # if the file is a TextIO Stream
+                self._pwd_file = pwd_file
             self.load()
+
         else:
             self._pwd_file = None
 
-    def check_pwd(self, username: str, password: str) -> bool:
+    def authenticate(self, username: str, password: str) -> bool:
         if not isinstance(username, str) or not isinstance(password, str):
             # ensure no security hole by passing arbitrary objects
             return False

@@ -19,6 +19,7 @@ _KeySource = Union[bytes, str, Path, TextIO, BinaryIO, SSHKey]
 
 class AbstractKeyManager(ABC):
     """
+    Store and retrieve all keys associated with a single user.
 
     """
 
