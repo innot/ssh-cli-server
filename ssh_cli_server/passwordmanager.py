@@ -6,7 +6,7 @@
 #
 import hashlib
 import uuid
-from abc import ABC
+from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Union, TextIO, Dict
 
@@ -26,7 +26,7 @@ class AbstractPasswordManager(ABC):
     The actual implementation is up to the subclass and can be anything from a simple Dictionary or File
     (see :class:`SimpleFilePasswordManager`) to an interface to an external user database.
     """
-
+    @abstractmethod
     def authenticate(self, username: str, password: str) -> bool:
         """
         Returns :code:`True` if the given password is valid for the given username.

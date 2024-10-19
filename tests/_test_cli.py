@@ -4,15 +4,14 @@
 #  For a copy, see the accompanying LICENSE.txt file or
 #  go to <https://opensource.org/licenses/MIT>.
 #
-import asyncio
 import sys
+from asyncio import CancelledError
 from typing import TextIO
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.contrib.ssh import PromptToolkitSSHSession
 
-from ssh_cli_server.abstract_cli import AbstractCLIFactory
-from ssh_cli_server.ssh_cli_server import AbstractCLI, SSHCLIPromptToolkitSession
+from ssh_cli_server.ssh_cli_server import AbstractCLI
 
 
 class TestCLI(AbstractCLI):
@@ -52,16 +51,6 @@ class TestCLI(AbstractCLI):
                     session.output.write("Closing SSH connection\n")
                     session.output.flush()
                     loop = False
-
-                elif command == "shutdown":
-                    if self.connection_info.sshserver:
-                        session.output.write("SSH Server is shutting down\n")
-                        session.output.flush()
-                        self.shutdown_task = asyncio.create_task(self.connection_info.sshserver.close())
-                        loop = False
-                    else:
-                        session.output.write(
-                            "Could not shut down ssh server: server not set_option\n")
                 elif command == "username":
                     session.output.write(self.connection_info.username + "\n")
                     session.output.flush()
@@ -69,17 +58,15 @@ class TestCLI(AbstractCLI):
                     # echo the input
                     session.output.write(command + "\n\n")
 
+            except CancelledError:
+                # Connection is closed programmatically
+                break
             except KeyboardInterrupt:
-                print("SSH connection closed by Ctrl-C")
+                session.output.write("SSH connection closed by Ctrl-C\n")
+                session.output.flush()
                 break
             except EOFError:
                 # Ctrl-D : ignore
                 pass
             finally:
                 pass
-
-
-class TestCLIFactory(AbstractCLIFactory):
-
-    def cli(self):
-        return TestCLI()

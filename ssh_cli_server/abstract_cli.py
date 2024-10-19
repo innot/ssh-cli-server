@@ -30,10 +30,3 @@ class AbstractCLI(abc.ABC):
     @connection_info.setter
     def connection_info(self, connection_info: ConnectionInfo):
         self._connection_info = connection_info
-
-
-class AbstractCLIFactory(abc.ABC):
-
-    @abstractmethod
-    def cli(self) -> AbstractCLI:
-        pass

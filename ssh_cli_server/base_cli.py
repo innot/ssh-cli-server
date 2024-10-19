@@ -7,17 +7,22 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import sys
+from asyncio import CancelledError
 from typing import TextIO, Optional, Dict, Any
 
-import asyncssh
 from argparsedecorator import ArgParseDecorator
 from prompt_toolkit import PromptSession, HTML, print_formatted_text
 from prompt_toolkit.completion import Completer, NestedCompleter
+from prompt_toolkit.contrib.ssh import PromptToolkitSSHSession
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style
 
 from ssh_cli_server.ssh_cli_server import AbstractCLI, SSHCLIPromptToolkitSession
+
+logger = logging.getLogger(__name__)
 
 style = Style.from_dict({
     'error': 'red',
@@ -122,11 +127,15 @@ class BaseCLI(AbstractCLI):
     """The :class:`~.argparse_decorator.ArgParseDecorator` used to decorate command methods."""
 
     def __init__(self):
+        super().__init__()
         self.stdout: TextIO = sys.stdout
         self.stdin: TextIO = sys.stdin
-        self.promptsession = None
-        self._server: Optional[asyncssh.SSHAcceptor] = None
-        self.completer: Optional[Completer] = None
+        self.ssh_session: PromptToolkitSSHSession | None = None
+        self.prompt_session: PromptSession | None = None
+        self.completer: Completer | None = None
+
+        # a asyncio task that shuts the server down
+        self.shutdown_task = None
 
     @property
     def command_dict(self) -> Dict[str, Optional[Dict]]:
@@ -166,7 +175,6 @@ class BaseCLI(AbstractCLI):
         """
         return PromptSession()
 
-    # noinspection PyMethodMayBeStatic
     async def run_prompt(self, prompt_session: PromptSession) -> Any:
         """
         Display a prompt to the remote user and wait for his command.
@@ -201,7 +209,7 @@ class BaseCLI(AbstractCLI):
 
     async def interact(self, ssh_session: SSHCLIPromptToolkitSession) -> None:
         """
-        Handle an incoming SSH connection.
+        Handle an incoming SSH session.
 
         This is the entry point to start the CLI in the given SSH session.
         It will display a prompt and execute the user input in a loop until the session is closed, either by the
@@ -220,8 +228,9 @@ class BaseCLI(AbstractCLI):
 
         print_formatted_text(HTML(self.intro))
 
+        loop = True
         with patch_stdout():
-            while True:
+            while loop:
                 try:
                     command = await self.run_prompt(self.prompt_session)
                     if command:
@@ -229,23 +238,24 @@ class BaseCLI(AbstractCLI):
                         if result == "exit":
                             # close current connection
                             print_warn("Closing SSH connection")
-                            break
+                            loop=False
 
-                        if result == "shutdown":
-                            if self.sshserver:
-                                print_warn("SSH Server is shutting down")
-                                self.sshserver.close()
-                                break
-                            print_warn("Could not shut down ssh server: server not set_option")
+                        elif result == "shutdown":
+                            print_warn("Shutting down server.")
+                            self.shutdown_task = asyncio.create_task(self.connection_info.sshserver.close())
+                            loop = False
 
+                except CancelledError:
+                    # Connection is closed programmatically
+                    loop = False
                 except KeyboardInterrupt:
                     print_warn("SSH connection closed by Ctrl-C")
-                    break
+                    loop = False
                 except EOFError:
                     # Ctrl-D : ignore
                     pass
-                except Exception as exc:
-                    break
-                finally:
-                    pass
+                except Exception as e:
+                    logger.exception(e)
+
+        # exiting loop will close the session & connection
         pass

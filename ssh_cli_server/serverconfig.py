@@ -84,7 +84,7 @@ class ServerConfig(Options):
             "enable_keys":
                 OptInfo(True, Options._to_bool),
             "enable_noauth":
-                OptInfo(False, Options._to_bool),
+                OptInfo(True, Options._to_bool),
             "master_key":
                 OptInfo(None),
             "auth_type":
