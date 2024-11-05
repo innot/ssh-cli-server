@@ -68,6 +68,7 @@ class ServerConfig(Options):
     passwordmanager: AbstractPasswordManager
     keymanager: AbstractKeyManager
     server_host_key: Path
+    max_connections: int
 
     def __init__(self, basedir: Path = None, **kwargs):
         if basedir:
@@ -100,7 +101,9 @@ class ServerConfig(Options):
                         lambda x: eval(x),
                         lambda x: isinstance(x, AbstractPasswordManager)),
             "server_host_key":
-                OptInfo(self.conf_dir / "server_host_key", Path, lambda x: x.exists())
+                OptInfo(self.conf_dir / "server_host_key", Path, lambda x: x.exists()),
+            "max_connections":
+                OptInfo(None, int, lambda x: 0 <= x <= 65535),
         }
 
         self._asyncssh_kwargs = {}

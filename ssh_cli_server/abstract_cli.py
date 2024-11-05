@@ -9,9 +9,7 @@ from __future__ import annotations
 import abc
 from abc import abstractmethod
 
-from prompt_toolkit.contrib.ssh import PromptToolkitSSHSession
-
-from ssh_cli_server.connection_info import ConnectionInfo
+from ssh_cli_server.sshcli_prompttoolkit_session import SSHCLIPromptToolkitSession
 
 
 class AbstractCLI(abc.ABC):
@@ -20,13 +18,5 @@ class AbstractCLI(abc.ABC):
         self._connection_info = None
 
     @abstractmethod
-    async def interact(self, ssh_session: PromptToolkitSSHSession):
+    async def interact(self, ssh_session: SSHCLIPromptToolkitSession):
         pass
-
-    @property
-    def connection_info(self) -> ConnectionInfo:
-        return self._connection_info
-
-    @connection_info.setter
-    def connection_info(self, connection_info: ConnectionInfo):
-        self._connection_info = connection_info

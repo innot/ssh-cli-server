@@ -82,7 +82,7 @@ class MyTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_server_start_and_stop(self):
         # this just tests the base test methods itself
         port = await self.start_test_server(BaseCLI)
-        self.assertTrue(self.server._is_running.is_set())
+        self.assertTrue(self.server._is_running_task.is_set())
         async with self.ssh_connection(port) as stdio:
             stdin, stdout, stderr = stdio
             self.assertIsNotNone(stdin)
@@ -90,7 +90,7 @@ class MyTestCase(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(stderr)
 
         await self.stop_test_server()
-        self.assertFalse(self.server._is_running.is_set())
+        self.assertFalse(self.server._is_running_task.is_set())
 
     async def test_exception_logging(self):
         port = await self.start_test_server(BaseCLI)
@@ -123,7 +123,7 @@ class MyTestCase(unittest.IsolatedAsyncioTestCase):
                 raise self.failureException(f"shutdown did not close connection") from exc
 
         # the server should also have stopped
-        self.assertFalse(self.server._is_running.is_set())
+        self.assertFalse(self.server._is_running_task.is_set())
 
 
     @asynccontextmanager

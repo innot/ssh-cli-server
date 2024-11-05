@@ -11,31 +11,20 @@ import concurrent.futures
 import inspect
 import ipaddress
 import logging
-import time
+import threading
 from asyncio import AbstractEventLoop
-from typing import Callable, Optional, Coroutine, Any, Type, TypeAlias, Union, List
+from typing import Callable, Optional, List
 
 import asyncssh
-from asyncssh import SSHServerConnection
-from prompt_toolkit.contrib.ssh import PromptToolkitSSHSession
+from asyncssh import SSHServerConnection, ChannelOpenError, SSHServerSession
 
+from ssh_cli_server import InteractFunction, CLI_Handler
 from ssh_cli_server.abstract_cli import AbstractCLI
 from ssh_cli_server.connection_info import ConnectionInfo
 from ssh_cli_server.serverconfig import ServerConfig
+from ssh_cli_server.sshcli_prompttoolkit_session import SSHCLIPromptToolkitSession
 
 logger = logging.getLogger(__name__)
-
-InteractFunction: TypeAlias = Callable[[PromptToolkitSSHSession], Coroutine[Any, Any, None]]
-CLI_Handler: TypeAlias = Union[Type[AbstractCLI], AbstractCLI, InteractFunction]
-
-
-class SSHCLIPromptToolkitSession(PromptToolkitSSHSession):
-
-    def __init__(self,
-                 interact: InteractFunction,
-                 conn_info: ConnectionInfo) -> None:
-        super().__init__(interact, enable_cpr=True)
-        self.connection_info = conn_info
 
 
 class SSHCLIServer:
@@ -65,7 +54,8 @@ class SSHCLIServer:
             self.config = ServerConfig()
 
         self._server_lock: asyncio.Lock = asyncio.Lock()
-        self._is_running: asyncio.Event = asyncio.Event()
+        self._is_running_task: asyncio.Event = asyncio.Event()
+        self._is_running_thread: threading.Event = threading.Event()
         self._is_closed: asyncio.Event = asyncio.Event()
         self._is_closed.set()
 
@@ -78,7 +68,7 @@ class SSHCLIServer:
         a new and seperate loop"""
 
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        self._server_thread: concurrent.futures.Future | None = None
+        self._server_thread: threading.Thread | None = None
         """The server background Thread. Set if started as a Thread. Otherwise None."""
 
         self._server_task: asyncio.Task | None = None
@@ -89,7 +79,7 @@ class SSHCLIServer:
         """
         :return: True if the server is running, False otherwise.
         """
-        return self._is_running.is_set()
+        return self._is_running_thread.is_set()
 
     @property
     def active_connections(self) -> List[SSHServerConnection]:
@@ -129,7 +119,7 @@ class SSHCLIServer:
 
         # if started as a thread wait for the thread to finish as well
         if self._server_thread:
-            self._server_thread.result()  # wait for the thread (if active) to finish
+            self._server_thread.join()  # wait for the thread (if active) to finish
 
     async def wait_closed(self) -> None:
         """
@@ -176,7 +166,7 @@ class SSHCLIServer:
 
         Example::
             server = SSHCLIServer()
-            await server.start_server_thread()
+            server.start_server_thread()
             # do other stuff
             server.close()  # can be called from somewhere else, e.g. as a rection to a "shutdown" CLI command.
 
@@ -188,14 +178,15 @@ class SSHCLIServer:
             asyncio.run(self.run_server())  # run server in new event loop. Blocks until server has been closed.
             logger.debug(f"Server thread finished")
 
-        self._server_thread = self._executor.submit(_thread_runner)
+        # self._server_thread = self._executor.submit(_thread_runner)
+        self._server_thread = threading.Thread(target=_thread_runner, name="SSHCLIServerThread", daemon=True)
+        self._server_thread.start()
 
         # The server should be up and running within 1 second
-        for _ in range(10):
-            if self.is_running:
-                return
-            time.sleep(0.1)
-        raise RuntimeError("SSHCLIServer did not start")
+        if not self._is_running_thread.wait(1):
+            self.close(force=True)
+            self._server_thread.join()
+            raise RuntimeError("SSHCLIServer did not start")
 
     async def start_server_task(self) -> None:
         """
@@ -210,14 +201,13 @@ class SSHCLIServer:
             server = SSHCLIServer()
             await server.start_server_task()
             # do other stuff
-            server.close()  # can be called from somewhere else, e.g. as a rection to a "shutdown" CLI command.
+            server.close()  # can be called from somewhere else, e.g. as a reaction to a "shutdown" CLI command.
             await server.wait_closed()  # block until the server has been closed
-
 
         """
         self._server_task = asyncio.create_task(self.run_server(), name="server_task")
         logger.debug("Server task started")
-        await self._is_running.wait()
+        await self._is_running_task.wait()
 
         def _cleanup(_: asyncio.Task) -> None:
             logger.debug("Server task finished")
@@ -242,17 +232,19 @@ class SSHCLIServer:
                                                                        server_host_keys=self._get_host_key())
 
             # at this point the server is running. Inform interested listeners.
-            self._is_running.set()
+            self._is_running_task.set()
+            self._is_running_thread.set()
             logger.info(f"SSH CLI Server started on port {self.config.port}")
 
             # wait for the server to close. This is done by calling self.close(), either internally or externally
             await self._server.wait_closed()
-            self._is_running.clear()
+            self._is_running_task.clear()
+            self._is_running_thread.clear()
             self._loop = None
 
             logger.info("SSH CLI Server closed")
 
-        # server has been stopped. Inform interesed listeners
+        # server has been stopped. Inform interested listeners
         self._is_closed.set()
 
     def _get_host_key(self) -> asyncssh.SSHKey:
@@ -272,9 +264,11 @@ class SSHCLIServer:
                 keyfile = open(self.config.server_host_key, 'wb')
                 keyfile.write(key.export_private_key())
                 keyfile.close()
-                logger.info(f"SSH Server: New private host key generated and saved as {self.config.server_host_key}")
+                logger.info(
+                    f"SSH Server: New private host key generated and saved as {self.config.server_host_key}")
             except Exception as exc:
-                logger.warning(f"SSH Server: could not write host key to {self.config.server_host_key}. Reason: {exc}")
+                logger.warning(
+                    f"SSH Server: could not write host key to {self.config.server_host_key}. Reason: {exc}")
 
         return key
 
@@ -332,7 +326,16 @@ class _InternalSSHConnection(asyncssh.SSHServer):
         if exc:
             logger.warning(f"Client connection closed due to {exc}", exc_info=exc)
 
-    def session_requested(self) -> PromptToolkitSSHSession:
+    def session_requested(self) -> SSHServerSession:
+
+        # check if this connection would exeed the maximum number of connections.
+        if self._config.max_connections:
+            # beware: this connection has already been added to the list of activ connections.
+            current = len(self.conn_info.sshserver.active_connections)
+            if current > self._config.max_connections:
+                raise ChannelOpenError(asyncssh.DISC_TOO_MANY_CONNECTIONS, "Maximum number of connections exceeded")
+
+        # create a CLi for this session (if required)
         if self._cli_factory:
             # create a new cli for this session
             cli = self._cli_factory()
@@ -348,13 +351,12 @@ class _InternalSSHConnection(asyncssh.SSHServer):
             interact_method: InteractFunction = self._cli_handler
 
             class _Cli(AbstractCLI):
-                async def interact(self, ssh_session: PromptToolkitSSHSession):
+                async def interact(self, ssh_session: SSHCLIPromptToolkitSession):
                     await interact_method(ssh_session)
 
             cli = _Cli()
 
         self.conn_info.session = SSHCLIPromptToolkitSession(cli.interact, self.conn_info)
-        cli.connection_info = self.conn_info
         return self.conn_info.session
 
     def password_auth_supported(self) -> bool:

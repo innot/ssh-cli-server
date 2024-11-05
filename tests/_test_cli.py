@@ -9,9 +9,9 @@ from asyncio import CancelledError
 from typing import TextIO
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.contrib.ssh import PromptToolkitSSHSession
 
 from ssh_cli_server.ssh_cli_server import AbstractCLI
+from ssh_cli_server.sshcli_prompttoolkit_session import SSHCLIPromptToolkitSession
 
 
 class TestCLI(AbstractCLI):
@@ -22,10 +22,10 @@ class TestCLI(AbstractCLI):
         self.stdin: TextIO = sys.stdin
         self.prompt_session = None
 
-        # a asyncio task that shuts the server down
+        # an asyncio task that shuts the server down
         self.shutdown_task = None
 
-    async def interact(self, ssh_session: PromptToolkitSSHSession) -> None:
+    async def interact(self, ssh_session: SSHCLIPromptToolkitSession) -> None:
         """
         Handle an incoming SSH connection.
 
@@ -36,23 +36,24 @@ class TestCLI(AbstractCLI):
         This will be called from the ssh server for each incoming connection. There is no need to call it directly.
 
         :param ssh_session: Session object
+
         """
         session = ssh_session.app_session
+        prompt_session = PromptSession("TestCLI\r\n")
         session.output.write("test server started\n")
-        self.prompt_session = PromptSession("TestCLI\r\n")
 
         loop = True
-
         while loop:
             try:
-                command = await self.prompt_session.prompt_async("#")
+                print("waiting for prompt")
+                command = await prompt_session.prompt_async("#")
                 if command == "exit":
                     # close current connection
                     session.output.write("Closing SSH connection\n")
                     session.output.flush()
                     loop = False
                 elif command == "username":
-                    session.output.write(self.connection_info.username + "\n")
+                    session.output.write(ssh_session.connection_info.username + "\n")
                     session.output.flush()
                 else:
                     # echo the input
@@ -60,13 +61,10 @@ class TestCLI(AbstractCLI):
 
             except CancelledError:
                 # Connection is closed programmatically
-                break
-            except KeyboardInterrupt:
-                session.output.write("SSH connection closed by Ctrl-C\n")
-                session.output.flush()
-                break
-            except EOFError:
-                # Ctrl-D : ignore
-                pass
-            finally:
-                pass
+                print("TestCli: CancelledError")
+                raise
+            except BaseException as exc:
+                print(f"TestCli.interact exception: {exc}")
+                raise exc
+
+        pass
