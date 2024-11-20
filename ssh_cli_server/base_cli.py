@@ -24,6 +24,16 @@ from ssh_cli_server.ssh_cli_server import AbstractCLI, SSHCLIPromptToolkitSessio
 
 logger = logging.getLogger(__name__)
 
+class SSHCLIExceptions(BaseException):
+    pass
+
+class CloseConnectionException(SSHCLIExceptions):
+    pass
+
+class ShutdownServerException(SSHCLIExceptions):
+    pass
+
+
 style = Style.from_dict({
     'error': 'red',
     'warn': 'orange',
@@ -200,9 +210,6 @@ class BaseCLI(AbstractCLI):
     async def execute(self, cmdline: str) -> Any:
         """
         Excecute the given command.
-
-        :return: 'exit' to close the current ssh session, 'shutdown' to end the ssh server.
-                  All other values are ignored.
         """
         result = await self.cli.execute_async(cmdline, base=self, error_handler=self.error_handler, stdout=self.stdout)
         return result
@@ -234,26 +241,27 @@ class BaseCLI(AbstractCLI):
                 try:
                     command = await self.run_prompt(self.prompt_session)
                     if command:
-                        result = await self.execute(command)
-                        if result == "exit":
-                            # close current connection
-                            print_warn("Closing SSH connection")
-                            loop=False
+                        await self.execute(command)
 
-                        elif result == "shutdown":
-                            print_warn("Shutting down server.")
-                            self.shutdown_task = asyncio.create_task(self.connection_info.sshserver.close())
-                            loop = False
+                except CloseConnectionException:
+                    # close current connection
+                    print_warn("Closing SSH connection")
+                    loop = False
+
+                except (ShutdownServerException, EOFError):
+                    print_warn("Shutting down server.")
+                    self.shutdown_task = asyncio.create_task(ssh_session.connection_info.sshserver.close())
+                    loop = False
 
                 except CancelledError:
                     # Connection is closed programmatically
-                    loop = False
+                    #
+                    raise
+
                 except KeyboardInterrupt:
                     print_warn("SSH connection closed by Ctrl-C")
                     loop = False
-                except EOFError:
-                    # Ctrl-D : ignore
-                    pass
+
                 except Exception as e:
                     logger.exception(e)
 

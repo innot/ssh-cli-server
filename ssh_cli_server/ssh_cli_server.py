@@ -12,7 +12,7 @@ import inspect
 import ipaddress
 import logging
 import threading
-from asyncio import AbstractEventLoop
+from asyncio import AbstractEventLoop, CancelledError
 from typing import Callable, Optional, List
 
 import asyncssh
@@ -25,6 +25,7 @@ from ssh_cli_server.serverconfig import ServerConfig
 from ssh_cli_server.sshcli_prompttoolkit_session import SSHCLIPromptToolkitSession
 
 logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
 
 class SSHCLIServer:
@@ -53,11 +54,16 @@ class SSHCLIServer:
         else:
             self.config = ServerConfig()
 
-        self._server_lock: asyncio.Lock = asyncio.Lock()
-        self._is_running_task: asyncio.Event = asyncio.Event()
-        self._is_running_thread: threading.Event = threading.Event()
-        self._is_closed: asyncio.Event = asyncio.Event()
+        self._exception_handler: Callable[[BaseException], None] = self.default_exception_handler
+
+        self._server_lock = asyncio.Lock()
+        self._is_running_task = asyncio.Event()
+        self._is_running_thread = threading.Event()
+        self._is_closed = asyncio.Event()
         self._is_closed.set()
+        self._server_condition = threading.Condition()
+
+        self._server_exception: BaseException | None = None
 
         self._server: asyncssh.SSHAcceptor | None = None
 
@@ -99,7 +105,35 @@ class SSHCLIServer:
     def _del_active_connection(self, connection: asyncssh.SSHServerConnection) -> None:
         self._connections.remove(connection)
 
-    def close(self, force: bool = False) -> None:
+    # noinspection PyMethodMayBeStatic
+    def default_exception_handler(self, exc: BaseException) -> None:
+        """
+        The default exception handler just logs the exception.
+
+        :param exc: The Exception to log
+        """
+        #logger.exception("Exception while running server", exc_info=exc)
+        pass
+
+    def set_exception_handler(self, handler: Callable[[BaseException], None] = None) -> None:
+        """
+        Set a callback for any unhandled exceptions within the server.
+        The server can run asynchronously as either an asyncio.Task or in a seperate threading.Thread.
+        In both cases exceptions do not bubble out of their Task/Thread Context and are hard to
+        retrieve.
+        The server exception handler is called with all unhandled exceptions occuring in the server.
+        The default exception handler just logs the exception.
+        :param handler: A callable which takes an Exception as an argument. `None` to use the default exception handler.
+        """
+        if handler is not None:
+            self._exception_handler = handler
+        else:
+            self._exception_handler = self.default_exception_handler
+
+    def call_exception_handler(self, exc: BaseException) -> None:
+        self._exception_handler(exc)
+
+    def close(self) -> None:
         """
         Stop the ssh server and exit.
         This method will close all connections gracefully, stop the server and exit the :meth:`run_server` coroutine.
@@ -112,14 +146,31 @@ class SSHCLIServer:
         If the server has been started via :meth:`start_server_thread` (i.e. it is running as a background thread
         with its own asyncio.EventLoop) then this method will only return if the thread has exited and the server
         is completely stopped. A call to :meth:`wait_closed` is not required.
-
-        :param force: If True all open connections will be aborted immediatly.
         """
-        asyncio.run_coroutine_threadsafe(self._close(force), self._loop)
+        future = asyncio.run_coroutine_threadsafe(self._close(), self._loop)
+
+        # when the server is run as a task then the future can only be fulfilled if the event loop
+        # gets a chance to run. But we can't yield to the event loop from a non-async function.
+        # Therefore, we need to ignore the future and wait for the closing in wait_closed()
 
         # if started as a thread wait for the thread to finish as well
+        # This ensures that the server is closed when we exit this method
         if self._server_thread:
-            self._server_thread.join()  # wait for the thread (if active) to finish
+            self._server_thread.join()
+
+    async def _close(self):
+        # close any open connections
+        for conn in self.active_connections:
+            conn.close()
+            await conn.wait_closed()
+
+        self._server.close()
+        await self._server.wait_closed()
+
+        # await asyncio.sleep(0)  # hand control to event loop to propagate the closure
+
+        # The run_server method should now continue towards its exit.
+        # Let it run in the background and let the close() resp. wait_closed() methods wait for it to finish.
 
     async def wait_closed(self) -> None:
         """
@@ -131,21 +182,14 @@ class SSHCLIServer:
         If the server is already closed (or has not yet started) this method will return immediately.
         """
         await self._is_closed.wait()
-
-    async def _close(self, force: bool = False):
-        # close any open connections
-        for conn in self.active_connections:
-            if force:
-                conn.abort()
-            else:
-                conn.close()
-
-        self._server.close()
-
-        if self._server_task:
-            # the server task should stop shortly after the server is closed
-            await asyncio.wait_for(self._server_task, timeout=10)
-        pass
+        if self._server_task and not self._server_task.done():
+            self._server_task.cancel()
+            try:
+                result = await self._server_task
+                if result.exception():
+                    self.call_exception_handler(result.exception())
+            except asyncio.CancelledError:
+                pass
 
     def start_server_thread(self) -> None:
         """
@@ -171,22 +215,45 @@ class SSHCLIServer:
             server.close()  # can be called from somewhere else, e.g. as a rection to a "shutdown" CLI command.
 
         """
+        if self._is_running_task.is_set() or self._is_running_thread.is_set():
+            # only one task/thread can run at once
+            raise RuntimeError("SSHCLIServer already started")
 
         def _thread_runner():
             # start server. This does not return until the server has been stopped.
             logger.debug(f"Server thread started")
-            asyncio.run(self.run_server())  # run server in new event loop. Blocks until server has been closed.
+            try:
+                asyncio.run(self.run_server())  # run server in new event loop. Blocks until server has been closed.
+            except BaseException as _exc:
+                self._server_exception = _exc
+                self.call_exception_handler(_exc)
+
+            # Event loop should be closed once asyncio.run is finished. But sometimes (during debugging) it is not...
+            if not self._loop.is_closed():
+                self._loop.close()
+
+            with self._server_condition:
+                self._server_condition.notify_all()
             logger.debug(f"Server thread finished")
 
-        # self._server_thread = self._executor.submit(_thread_runner)
         self._server_thread = threading.Thread(target=_thread_runner, name="SSHCLIServerThread", daemon=True)
         self._server_thread.start()
 
-        # The server should be up and running within 1 second
-        if not self._is_running_thread.wait(1):
-            self.close(force=True)
-            self._server_thread.join()
-            raise RuntimeError("SSHCLIServer did not start")
+        # wait for the server to start (or a premature end of thread)
+        with self._server_condition:
+            self._server_condition.wait(100)
+
+        # server started or raised an exception. Check which:
+        if self._is_running_thread.is_set():
+            # server is running normally - all is good
+            return
+        else:
+            # server asyncio task has returned prematurly - probably an exception
+            if self._server_exception:
+                self._server_thread.join()  # wait until server thread is fully terminated
+                raise RuntimeError("Server thread raised an exception on startup") from self._server_exception
+        # when here then the server is hung (neither started nor an exception)
+        raise RuntimeError("Server is hung")
 
     async def start_server_task(self) -> None:
         """
@@ -205,12 +272,45 @@ class SSHCLIServer:
             await server.wait_closed()  # block until the server has been closed
 
         """
-        self._server_task = asyncio.create_task(self.run_server(), name="server_task")
-        logger.debug("Server task started")
-        await self._is_running_task.wait()
+        if self._is_running_task.is_set() or self._is_running_thread.is_set():
+            # only one task/thread can run at once
+            raise RuntimeError("SSHCLIServer already started")
 
-        def _cleanup(_: asyncio.Task) -> None:
-            logger.debug("Server task finished")
+        # start the server...
+        self._server_task = asyncio.create_task(self.run_server(), name="server_task")
+
+        # ... and check that it is running and did not throw an Exception
+        async def _wait_task():
+            await self._is_running_task.wait()
+
+        wait_for_running_task = asyncio.create_task(_wait_task(), name="wait_for_running_task")
+
+        done, pending = await asyncio.wait((self._server_task, wait_for_running_task),
+                                           return_when=asyncio.FIRST_COMPLETED)
+
+        if wait_for_running_task in done:
+            # server has been started successfully
+            await wait_for_running_task
+            logger.debug("Server task started")
+            return
+        else:
+            # task finished before running event was set - likely an exception
+            wait_for_running_task.cancel()
+            try:
+                await wait_for_running_task
+            except asyncio.CancelledError:
+                exception = self._server_task.exception()
+                self.call_exception_handler(exception)
+                raise RuntimeError("Server task raised an exception on startup") from exception
+
+        def _cleanup(task: asyncio.Task) -> None:
+            try:
+                _exc = task.exception()
+                if _exc is not None:
+                    self._server_exception = _exc
+                    self.call_exception_handler(_exc)
+            except asyncio.CancelledError:
+                raise
 
         self._server_task.add_done_callback(_cleanup)
 
@@ -218,34 +318,42 @@ class SSHCLIServer:
         """
         Start the SSH server and run until the server is shut down.
         """
-        if self._server_lock.locked():
+        if not self._server_lock.locked():
+            await self._server_lock.acquire()
+        else:
             # server is already started
             raise RuntimeError("run_server() called with server already running")
 
-        async with self._server_lock:
+        try:
             self._loop = asyncio.get_running_loop()
-
+            self._loop.slow_callback_duration = 0.3     # asyncssh is sometimes slow
             self._is_closed.clear()
 
             self._server: asyncssh.SSHAcceptor = await asyncssh.listen("", self.config.port,
                                                                        server_factory=self._server_factory,
                                                                        server_host_keys=self._get_host_key())
-
             # at this point the server is running. Inform interested listeners.
             self._is_running_task.set()
             self._is_running_thread.set()
+            with self._server_condition:
+                self._server_condition.notify_all()
             logger.info(f"SSH CLI Server started on port {self.config.port}")
 
             # wait for the server to close. This is done by calling self.close(), either internally or externally
             await self._server.wait_closed()
+            pass
+
+        except BaseException as exc:
+            self._server_exception = exc
+            raise RuntimeError(f"Server raised an exception on startup") from exc
+
+        finally:
             self._is_running_task.clear()
             self._is_running_thread.clear()
-            self._loop = None
-
+            # server has been stopped. Inform interested listeners
+            self._is_closed.set()
+            self._server_lock.release()
             logger.info("SSH CLI Server closed")
-
-        # server has been stopped. Inform interested listeners
-        self._is_closed.set()
 
     def _get_host_key(self) -> asyncssh.SSHKey:
         """

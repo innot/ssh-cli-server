@@ -6,19 +6,26 @@
 #
 import asyncio
 import inspect
+import logging
 import tempfile
 import unittest
 from multiprocessing import Process, Event
 from pathlib import Path
+from signal import SIGINT
 
 import asyncssh
-from asyncssh import PermissionDenied, ChannelOpenError
+from asyncssh import PermissionDenied, ChannelOpenError, SSHReader
+from asyncssh.stream import SSHClientStreamSession, SSHWriter
 
 from ssh_cli_server.abstract_cli import AbstractCLI
 from ssh_cli_server.passwordmanager import SimpleFilePasswordManager
 from ssh_cli_server.serverconfig import ServerConfig
 from ssh_cli_server.ssh_cli_server import SSHCLIServer
+from ssh_cli_server.sshcli_prompttoolkit_session import SSHCLIPromptToolkitSession
 from tests._test_cli import TestCLI
+
+
+logging.basicConfig(level=logging.CRITICAL)
 
 
 def _run_server(basedir, **kwargs):
@@ -35,8 +42,11 @@ def _run_server(basedir, **kwargs):
 
 
 class MyTestCase(unittest.IsolatedAsyncioTestCase):
+    port = 23450
 
     async def start_test_server(self, *args, **kwargs):
+        """Run the SSH CLI Server in a seperate Process to ensure that there is no interference
+        between the server under test and the tests making connections to the server."""
         self.server_started = Event()
         kwargs['server_started'] = self.server_started
         self.server_process = Process(target=_run_server, args=args, kwargs=kwargs)
@@ -48,30 +58,26 @@ class MyTestCase(unittest.IsolatedAsyncioTestCase):
             self.fail("SSH CLI Server did not start within 2 seconds")
 
     async def stop_server(self):
+        """Stop the SSH CLI Server Process."""
         self.server_process.terminate()
         self.server_process.join()
-
-    server: SSHCLIServer = None
 
     async def asyncSetUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.tmppath = Path(self.tmpdir.name)
-        self.port = 23450
 
     async def asyncTearDown(self) -> None:
         self.tmpdir.cleanup()
 
-    def get_port(self) -> int:
+    @classmethod
+    def get_port(cls) -> int:
         """Return an unused port number for each server test to avoid interference in case some tests leave dangling
         Server tasks or threads."""
-        self.port += 1
-        return self.port
+        cls.port += 1
+        return cls.port
 
     async def test_server(self):
-        print("test: " + inspect.currentframe().f_code.co_name)
-        # logger = SSHLogger()
-        # logger.setLevel(logging.DEBUG)
-        # logger.set_debug_level(3)
+        # print("test: " + inspect.currentframe().f_code.co_name)
 
         port = self.get_port()
 
@@ -82,20 +88,10 @@ class MyTestCase(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(conn)
 
             stdin, stdout, stderr = await conn.open_session(term_type="dumb")
-
-            try:
-                response: str = await asyncio.wait_for(stdout.readline(), 1)
-                self.assertTrue("started" in response)
-            except asyncio.TimeoutError as exc:
-                raise self.failureException(f"No response from ssh server {exc}") from exc
+            await self.wait_response("started", stdout)
 
             stdin.writelines("echostring\n")
-
-            try:
-                response = await asyncio.wait_for(stdout.readline(), 1)
-                self.assertTrue("echostring" in response)
-            except asyncio.TimeoutError as exc:
-                raise self.failureException(f"No response from ssh server {exc}") from exc
+            await self.wait_response("echostring", stdout)
 
             stdin.writelines("exit\n")
             try:
@@ -106,7 +102,7 @@ class MyTestCase(unittest.IsolatedAsyncioTestCase):
         await self.stop_server()
 
     async def test_password_auth(self):
-        print("test: " + inspect.currentframe().f_code.co_name)
+        # print("test: " + inspect.currentframe().f_code.co_name)
 
         port = self.port
 
@@ -118,37 +114,28 @@ class MyTestCase(unittest.IsolatedAsyncioTestCase):
 
         async with asyncssh.connect(host='localhost', port=port, username="foo", password="bar",
                                     known_hosts=None) as conn:
-
             stdin, stdout, stderr = await conn.open_session(term_type="dumb")
-
-            try:  # disregard all output
-                await asyncio.wait_for(stdout.readline(), 1)
-            except asyncio.TimeoutError as exc:
-                raise self.failureException(f"No response from ssh server {exc}") from exc
+            await self.wait_response("started", stdout)
 
             stdin.writelines("username\n")
-            try:
-                response: str = await asyncio.wait_for(stdout.readline(), 1)
-                self.assertTrue("foo" in response)
-            except asyncio.TimeoutError as exc:
-                raise self.failureException(f"No response from ssh server {exc}") from exc
+            await self.wait_response("foo", stdout)
 
         # test bad password
         with self.assertRaises(PermissionDenied):
             async with asyncssh.connect(host='localhost', port=port, username="foo", password="",
-                                   known_hosts=None):
+                                        known_hosts=None):
                 pass
 
         # test unknown user
         with self.assertRaises(PermissionDenied):
             async with asyncssh.connect(host='localhost', port=port, username="test", password="",
-                                   known_hosts=None):
+                                        known_hosts=None):
                 pass
 
         await self.stop_server()
 
     async def test_cli_types(self):
-        print("test: " + inspect.currentframe().f_code.co_name)
+        # print("test: " + inspect.currentframe().f_code.co_name)
         port = self.get_port()
         serverconfig = ServerConfig(self.tmppath, port=port, enable_noauth=True)
 
@@ -171,43 +158,37 @@ class MyTestCase(unittest.IsolatedAsyncioTestCase):
         server.close()
 
         # Test with a CLI Factory
-        cli = TestCLI()
         self.flag = False
 
         def _test_cli() -> AbstractCLI:
             self.flag = True  # to check that this code was executed.
-            return cli
+            return TestCLI()
 
         server = SSHCLIServer(None, serverconfig, cli_factory=_test_cli)
         server.start_server_thread()
         await self.connection_test(port)
         self.assertTrue(self.flag)
         server.close()
-        pass
 
     async def connection_test(self, port: int):
-        print("test: " + inspect.currentframe().f_code.co_name)
+        # print("test: " + inspect.currentframe().f_code.co_name)
 
         conn = await  asyncssh.connect(host='localhost', port=port, known_hosts=None)
 
         stdin, stdout, stderr = await conn.open_session(term_type="dumb")
-
-        result = ""
-        try:
-            response: str = await asyncio.wait_for(stdout.readline(), 1)
-            self.assertTrue("started" in response)
-        except asyncio.TimeoutError as exc:
-            raise self.failureException(f"No response from ssh server {exc}") from exc
-        except BaseException as exc:
-            print(exc)
-            pass
+        await self.wait_response("started", stdout)
 
         conn.close()
+        await asyncio.sleep(0.1)  # let the connection closure propagate
+
         pass
 
     async def test_server_close(self):
-        print("test: " + inspect.currentframe().f_code.co_name)
-        server = SSHCLIServer(TestCLI())
+        # this also tests multiple restarts of the server
+        # print("test: " + inspect.currentframe().f_code.co_name)
+        port = self.get_port()
+        config = ServerConfig(port=port)
+        server = SSHCLIServer(TestCLI(), config)
 
         # test with a thread
         server.start_server_thread()
@@ -217,7 +198,7 @@ class MyTestCase(unittest.IsolatedAsyncioTestCase):
         await server.wait_closed()  # has no effect but should not cause any errors
         self.assertFalse(server.is_running)
         self.assertFalse(server._server_thread.is_alive())
-        self.assertIsNone(server._loop)
+        self.assertTrue(server._loop.is_closed())
 
         # test with a task
         await server.start_server_task()
@@ -227,18 +208,36 @@ class MyTestCase(unittest.IsolatedAsyncioTestCase):
         await server.wait_closed()
         self.assertFalse(server.is_running)
         self.assertTrue(server._server_task.done())
-        self.assertIsNone(server._loop)
+        self.assertFalse(server._loop.is_closed())  # as this is the main event loop it should not have closed
 
-        # test with running run_server directly
-        task = asyncio.create_task(server.run_server())
-        await server._is_running_task.wait()
+        # test with an open connection
+        server.start_server_thread()
+        num_connections = 4
+        connections = []
+        channels = []
+
+        for i in range(num_connections):
+            conn = await asyncssh.connect(host='localhost', port=port, known_hosts=None)
+            connections.append(conn)
+            _, stdout, stderr = await conn.open_session(term_type="dumb")
+            await self.wait_response("started", stdout)
+            channels.append(stdout.channel)
+
+        await asyncio.sleep(0.1)
+
         server.close()
-        await server.wait_closed()
+        await asyncio.sleep(0.1)  # give the event loop some time to close all connections
+        self.assertEqual(len(server.active_connections), 0)
+        for chan in channels:
+            self.assertTrue(chan.is_closing())
+        for conn in connections:
+            self.assertTrue(conn.is_closed())
         self.assertFalse(server.is_running)
-        self.assertTrue(task.done())
+        self.assertFalse(server._server_thread.is_alive())
+        self.assertTrue(server._loop.is_closed())
 
     async def test_wait_closed(self):
-        print("test: " + inspect.currentframe().f_code.co_name)
+        # print("test: " + inspect.currentframe().f_code.co_name)
         server = SSHCLIServer(TestCLI())
         await server.start_server_task()
 
@@ -248,6 +247,7 @@ class MyTestCase(unittest.IsolatedAsyncioTestCase):
 
         # test with close
         server.close()
+
         try:
             await asyncio.wait_for(server.wait_closed(), 1)
         except asyncio.TimeoutError:
@@ -255,7 +255,7 @@ class MyTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(server.is_running)
 
     async def test_start_as_thread(self):
-        print("test: " + inspect.currentframe().f_code.co_name)
+        # print("test: " + inspect.currentframe().f_code.co_name)
         port = self.get_port()
         serverconfig = ServerConfig(self.tmppath, port=port, enable_noauth=True)
 
@@ -265,11 +265,10 @@ class MyTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(server.is_running)
 
         server.close()
-        await server.wait_closed()
         self.assertFalse(server.is_running)
 
     async def test_start_as_task(self):
-        print("test: " + inspect.currentframe().f_code.co_name)
+        # print("test: " + inspect.currentframe().f_code.co_name)
         port = self.get_port()
         serverconfig = ServerConfig(self.tmppath, port=port, enable_noauth=True)
 
@@ -282,14 +281,14 @@ class MyTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(server.is_running)
 
     async def test_multiple_connections(self):
-        print("test: " + inspect.currentframe().f_code.co_name)
+        # print("test: " + inspect.currentframe().f_code.co_name)
 
         class _CliCounter(TestCLI):
             counter: int = 0
 
-            async def interact(self, session):
+            async def interact(self, session: SSHCLIPromptToolkitSession):
                 self.counter += 1
-                await asyncio.sleep(3600)  # will be cancelled when the connection is lost
+                await super().interact(session)
 
         cli = _CliCounter()
 
@@ -307,33 +306,111 @@ class MyTestCase(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(conn)
             connections.append(conn)
             _, stdout, stderr = await conn.open_session(term_type="dumb")
-            # try:
-            #    response: str = await asyncio.wait_for(stdout.readline(), 1000)
-            #    self.assertTrue("started" in response)
-            # except asyncio.TimeoutError as exc:
-            #    raise self.failureException(f"No response from ssh server {exc}") from exc
+            await self.wait_response("started", stdout)
 
         # The next connection exceeds max_connections and should fail
-        conn = await asyncssh.connect(host='localhost', port=port, known_hosts=None)
-        connections.append(conn)
-        with self.assertRaises(ChannelOpenError):
-            await conn.open_session(term_type="dumb")
+        async with asyncssh.connect(host='localhost', port=port, known_hosts=None) as conn:
+            with self.assertRaises(ChannelOpenError):
+                _, stdout, stderr = await conn.open_session(term_type="dumb")
 
-        # cleanup
-        try:
-            while True:
-                conn = connections.pop()
-                conn.close()
-                await conn.wait_closed()
-        except IndexError:
-            pass
-
+        # Closing the server should also close all connections
+        server.close()
+        self.assertFalse(server.is_running)
+        self.assertTrue(len(server.active_connections) == 0)
         self.assertEqual(num_connections, cli.counter)
 
-        server.close()
-        await server.wait_closed()
-        self.assertFalse(server.is_running)
         pass
+
+    async def test_ctrl_c(self):
+        # print("test: " + inspect.currentframe().f_code.co_name)
+
+        port = self.get_port()
+        serverconfig = ServerConfig(self.tmppath, port=port, enable_noauth=True)
+
+        server = SSHCLIServer(TestCLI, serverconfig)
+        server.start_server_thread()
+
+        try:
+            async with asyncssh.connect(host='localhost', port=port, known_hosts=None) as conn:
+
+                chan, session = await conn.create_session(
+                    SSHClientStreamSession, term_type="dumb")  # type: ignore
+
+                session: SSHClientStreamSession
+                stdout = SSHReader(session, chan)
+                stdin = SSHWriter(session, chan)
+
+                await self.wait_response("started", stdout)
+
+                # Ctrl-C to abort a long-running command
+                stdin.write("longtask\n")
+                await self.wait_response("longtask started", stdout)
+                stdin.write('\x03')  # send ctrl-c
+                await self.wait_response("Ctrl-C", stdout)
+
+                # SIGINT to abort a long-running command
+                stdin.write("longtask\n")
+                await self.wait_response("longtask started", stdout)
+                chan.send_signal(SIGINT)
+                await self.wait_response("SIGINT", stdout)
+
+                # BREAK Signal to close the connection
+                stdin.write("longtask\n")
+                await self.wait_response("longtask started", stdout)
+                chan.send_break(500)  # this should close the connection
+                try:
+                    await asyncio.wait_for(chan.wait_closed(), 1)
+                except asyncio.TimeoutError:
+                    self.fail(f"break did not close connection")
+        finally:
+            server.close()
+
+    async def wait_response(self, response: str, stdout: SSHReader):
+        try:
+            while True:
+                server_response: str = await asyncio.wait_for(stdout.readline(), 1)
+                if response in server_response:
+                    break
+        except asyncio.TimeoutError:
+            self.fail(f"Did not receive '{response}' from ssh server (Timeout)")
+
+    async def test_server_exceptions(self):
+        with self.assertRaises(AttributeError):
+            # No CLI
+            SSHCLIServer(None)
+
+        with self.assertRaises(AttributeError):
+            # CLI and cli_factory
+            SSHCLIServer(TestCLI(), cli_factory=lambda: TestCLI())
+
+        # Server restart should cause an Exception
+        port = self.get_port()
+        config = ServerConfig(self.tmppath, port=port, enable_noauth=True)
+        server = SSHCLIServer(TestCLI(), config)
+        server.start_server_thread()
+        with self.assertRaises(RuntimeError):
+            await server.start_server_task()
+        with self.assertRaises(RuntimeError):
+            server.start_server_thread()
+
+        # also run_server can not be called multiple times
+        with self.assertRaises(RuntimeError):
+            await server.run_server()
+
+        # Using a port twice is also no good. Need to test all start methods as they all have seperate
+        # exception handlers
+        server2 = SSHCLIServer(TestCLI(), config)
+
+        with self.assertRaises(RuntimeError):
+            await server2.run_server()
+
+        with self.assertRaises(RuntimeError):
+            server2.start_server_thread()
+
+        with self.assertRaises(RuntimeError):
+            await server2.start_server_task()
+
+        server.close()
 
 
 if __name__ == '__main__':
